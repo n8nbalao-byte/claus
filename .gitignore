@@ -1,0 +1,9 @@
+webhook_log.txt
+webhook_error.txt
+api_error.txt
+.trae/
+.vscode/
+node_modules/
+*.zip
+*.bak
+*.tmp
