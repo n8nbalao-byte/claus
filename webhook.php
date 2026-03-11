@@ -62,17 +62,22 @@ $fromMe = $msgData['key']['fromMe'];
 $number = explode('@', $remoteJid)[0];
 $pushName = $data['data']['pushName'] ?? 'Usuário';
 
-// Ignorar mensagens enviadas pelo próprio bot
-if ($fromMe) {
-    die('Mensagem enviada por mim');
-}
-
-// Extrair texto da mensagem
+// Extrair texto da mensagem (necessário para distinguir comandos do bot)
 $messageText = '';
 if (isset($msgData['message']['conversation'])) {
     $messageText = $msgData['message']['conversation'];
 } elseif (isset($msgData['message']['extendedTextMessage']['text'])) {
     $messageText = $msgData['message']['extendedTextMessage']['text'];
+}
+
+// Ignorar certas mensagens do próprio bot, mas permitir input do admin mesmo com fromMe=true
+if ($fromMe) {
+    // se começar com Claus: ou for um aviso interno, não precisamos processar
+    if (preg_match('/^\*?Claus:/i', $messageText) || stripos($messageText, 'mensagem enviada para') !== false) {
+        die('Mensagem do bot, ignorando');
+    }
+    // caso contrário, trata-se de uma instrução digitada pelo admin no chat consigo mesmo
+    // continua o fluxo normalmente, marcando como admin mais adiante
 }
 
 if (empty($messageText)) {
