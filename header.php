@@ -107,6 +107,9 @@ $current_page = basename($_SERVER['PHP_SELF'], ".php");
         .message.admin { align-self: flex-end; background: var(--primary); color: white; border-bottom-right-radius: 2px; }
         .message.agent { align-self: flex-start; background: var(--bg-color); color: var(--text-primary); border: 1px solid var(--border-color); border-bottom-left-radius: 2px; }
         .message-info { font-size: 10px; margin-top: 5px; opacity: 0.7; display: block; }
+        .message-content { display: flex; align-items: flex-start; gap: 8px; }
+        .speak-btn { background: none; border: none; color: var(--text-secondary); cursor: pointer; font-size: 14px; padding: 2px; border-radius: 50%; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+        .speak-btn:hover { background: var(--border-color); }
 
         /* Estilos para entrada de voz */
         .input-container { display: flex; align-items: flex-end; gap: 8px; }

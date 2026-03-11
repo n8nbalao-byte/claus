@@ -14,7 +14,7 @@ require_once 'header.php';
         <div class="chat-input-area">
             <div class="input-container">
                 <textarea id="chat-input" placeholder="Digite uma instrução ou mensagem para o Claus... (Enter para enviar, Shift+Enter para nova linha)" onkeydown="handleChatKey(event)"></textarea>
-                <button id="voice-btn" onclick="toggleVoiceRecording()" title="Gravar áudio" style="background: none; border: none; color: var(--text-secondary); font-size: 18px; cursor: pointer; margin-right: 8px;">🎤</button>
+                <button id="voice-btn" onclick="toggleVoiceRecording()" title="Falar instrução (reconhecimento automático)" style="background: none; border: none; color: var(--text-secondary); font-size: 18px; cursor: pointer; margin-right: 8px;">🎤</button>
             </div>
             <button onclick="sendMessage()">Enviar</button>
         </div>
@@ -117,10 +117,12 @@ require_once 'header.php';
         setInterval(loadChat, 5000);
     });
 
-    // Variáveis para gravação de áudio
+    // Variáveis para gravação de áudio e síntese de voz
     let mediaRecorder = null;
     let audioChunks = [];
     let isRecording = false;
+    let recognition = null;
+    let isListening = false;
 
     async function toggleVoiceRecording() {
         const voiceBtn = document.getElementById('voice-btn');
@@ -133,34 +135,107 @@ require_once 'header.php';
             voiceBtn.title = 'Gravar áudio';
             isRecording = false;
         } else {
-            // Iniciar gravação
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                mediaRecorder = new MediaRecorder(stream);
-                audioChunks = [];
-                
-                mediaRecorder.ondataavailable = (event) => {
-                    audioChunks.push(event.data);
-                };
-                
-                mediaRecorder.onstop = async () => {
-                    const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
-                    await sendAudioMessage(audioBlob);
-                    
-                    // Parar todos os tracks do stream
-                    stream.getTracks().forEach(track => track.stop());
-                };
-                
-                mediaRecorder.start();
-                voiceBtn.innerHTML = '⏹️';
-                voiceBtn.classList.add('recording');
-                voiceBtn.title = 'Parar gravação';
-                isRecording = true;
-                
-            } catch (error) {
-                console.error('Erro ao acessar microfone:', error);
-                alert('Erro ao acessar microfone. Verifique as permissões.');
+            // Verificar se há suporte à Speech Recognition
+            if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+                startSpeechRecognition();
+            } else {
+                // Fallback para gravação de áudio
+                startAudioRecording();
             }
+        }
+    }
+
+    function startSpeechRecognition() {
+        const voiceBtn = document.getElementById('voice-btn');
+        
+        // Inicializar reconhecimento de voz
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        recognition = new SpeechRecognition();
+        
+        recognition.lang = 'pt-BR'; // Português do Brasil
+        recognition.continuous = false;
+        recognition.interimResults = false;
+        recognition.maxAlternatives = 1;
+        
+        recognition.onstart = function() {
+            isListening = true;
+            voiceBtn.innerHTML = '🎙️';
+            voiceBtn.classList.add('recording');
+            voiceBtn.title = 'Ouvindo... Clique para parar';
+            console.log('Reconhecimento de voz iniciado');
+        };
+        
+        recognition.onresult = function(event) {
+            const transcript = event.results[0][0].transcript;
+            console.log('Transcrição:', transcript);
+            
+            // Inserir texto no campo de entrada
+            const input = document.getElementById('chat-input');
+            input.value = transcript;
+            
+            // Enviar automaticamente
+            sendMessage();
+        };
+        
+        recognition.onerror = function(event) {
+            console.error('Erro no reconhecimento de voz:', event.error);
+            alert('Erro no reconhecimento de voz: ' + event.error);
+            stopSpeechRecognition();
+        };
+        
+        recognition.onend = function() {
+            stopSpeechRecognition();
+        };
+        
+        try {
+            recognition.start();
+        } catch (error) {
+            console.error('Erro ao iniciar reconhecimento:', error);
+            alert('Erro ao iniciar reconhecimento de voz');
+            stopSpeechRecognition();
+        }
+    }
+
+    function stopSpeechRecognition() {
+        if (recognition && isListening) {
+            recognition.stop();
+        }
+        isListening = false;
+        const voiceBtn = document.getElementById('voice-btn');
+        voiceBtn.innerHTML = '🎤';
+        voiceBtn.classList.remove('recording');
+        voiceBtn.title = 'Falar instrução';
+    }
+
+    async function startAudioRecording() {
+        const voiceBtn = document.getElementById('voice-btn');
+        
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            mediaRecorder = new MediaRecorder(stream);
+            audioChunks = [];
+            
+            mediaRecorder.ondataavailable = (event) => {
+                audioChunks.push(event.data);
+            };
+            
+            mediaRecorder.onstop = async () => {
+                const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                await sendAudioMessage(audioBlob);
+                
+                // Parar todos os tracks do stream
+                stream.getTracks().forEach(track => track.stop());
+            };
+            
+            mediaRecorder.start();
+            voiceBtn.innerHTML = '⏹️';
+            voiceBtn.classList.add('recording');
+            voiceBtn.title = 'Parar gravação';
+            isRecording = true;
+            
+        } catch (error) {
+            console.error('Erro ao acessar microfone:', error);
+            alert('Erro ao acessar microfone. Verifique as permissões.');
         }
     }
 
@@ -184,6 +259,73 @@ require_once 'header.php';
         } catch (error) {
             console.error('Erro ao enviar áudio:', error);
             alert('Erro ao enviar áudio para o agente.');
+        }
+    }
+
+    // Função para síntese de voz (falar respostas)
+    function speakText(text) {
+        if ('speechSynthesis' in window) {
+            // Cancelar qualquer fala anterior
+            speechSynthesis.cancel();
+            
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.lang = 'pt-BR'; // Português do Brasil
+            utterance.rate = 0.9; // Velocidade um pouco mais lenta
+            utterance.pitch = 1; // Tom normal
+            
+            // Tentar usar uma voz em português se disponível
+            const voices = speechSynthesis.getVoices();
+            const portugueseVoice = voices.find(voice => voice.lang.startsWith('pt'));
+            if (portugueseVoice) {
+                utterance.voice = portugueseVoice;
+            }
+            
+            speechSynthesis.speak(utterance);
+        } else {
+            console.warn('Síntese de voz não suportada neste navegador');
+        }
+    }
+
+    // Modificar loadChat para adicionar botão de ouvir nas mensagens do agente
+    async function loadChat() {
+        const logs = await fetchData('api.php?action=get_admin_chat&limit=50');
+        const chatMessages = document.getElementById('chat-messages');
+        
+        // Guardar a posição atual e verificar se o usuário está no fundo
+        const isAtBottom = chatMessages.scrollHeight - chatMessages.scrollTop <= chatMessages.clientHeight + 50;
+        
+        // Filtrar apenas admin e agent e inverter para ordem cronológica
+        const chatLogs = logs.filter(log => log.sender_role === 'admin' || log.sender_role === 'agent').reverse();
+        
+        chatMessages.innerHTML = '';
+        chatLogs.forEach(log => {
+            const isAgent = log.sender_role === 'agent';
+            const time = new Date(log.timestamp).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+            
+            // Renderizar negritos formatados pela IA (*Texto:*)
+            const formattedMessage = log.message.replace(/\*([^\*]+):\*/g, '<strong>$1:</strong>');
+
+            // Adicionar botão de ouvir para mensagens do agente
+            let speakButton = '';
+            if (isAgent && 'speechSynthesis' in window) {
+                speakButton = `<button onclick="speakText('${formattedMessage.replace(/'/g, "\\'").replace(/"/g, '\\"')}')" class="speak-btn" title="Ouvir resposta">🔊</button>`;
+            }
+            
+            chatMessages.innerHTML += `
+                <div class="message ${isAgent ? 'agent' : 'admin'}">
+                    <div class="message-content">
+                        ${formattedMessage}
+                        ${speakButton}
+                    </div>
+                    <span class="message-info">${isAgent ? 'Claus' : 'Você'} • ${time}</span>
+                </div>
+            `;
+        });
+
+        // Forçar a rolagem se for a primeira carga ou se o usuário já estava no fundo
+        if (!chatMessages.hasAttribute('data-initial-load') || isAtBottom) {
+            scrollToBottom();
+            chatMessages.setAttribute('data-initial-load', 'true');
         }
     }
 </script>
