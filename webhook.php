@@ -16,6 +16,13 @@ if (isset($_GET['test'])) {
     die('Webhook está online e funcionando!');
 }
 
+if (isset($_GET['send_test'])) {
+    // Endpoint para testar mensagens manualmente (via GET para fácil teste)
+    logEvent("[TESTE] Webhook chamado com send_test");
+    echo json_encode(['status' => 'online', 'timestamp' => date('Y-m-d H:i:s')]);
+    die();
+}
+
 // --- INÍCIO DO PROCESSAMENTO ---
 
 // Função auxiliar para logs
@@ -58,10 +65,11 @@ if (isset($msgData['message']['conversation'])) {
 }
 
 if (empty($messageText)) {
+    logEvent("Mensagem sem texto, ignorando");
     die('Mensagem sem texto');
 }
 
-logEvent("MENSAGEM DE $number: $messageText");
+logEvent("MENSAGEM DE $number: $messageText (fromMe=$fromMe)");
 
 // Verificar se é mensagem DO próprio bot (respostas que ele enviou)
 $isOwnBotResponse = false;
@@ -71,17 +79,12 @@ if ($fromMe && (preg_match('/^\*?Claus:/i', $messageText) || stripos($messageTex
 
 // Se for resposta do próprio bot, ignorar (não processar novamente)
 if ($isOwnBotResponse) {
+    logEvent("Mensagem do bot detectada, ignorando para evitar loop");
     die('Resposta do bot, ignorando para evitar loop');
 }
 
 // Se for fromMe=true MAS não for resposta do bot, é um comando do admin para si mesmo
 // Continua processamento normal (será tratado como admin mais adiante)
-
-if (empty($messageText)) {
-    die('Mensagem sem texto');
-}
-
-logEvent("MENSAGEM DE $number: $messageText");
 
 // --- LÓGICA DE AGRUPAMENTO DE MENSAGENS (ANTISPAM/DELAY) ---
 

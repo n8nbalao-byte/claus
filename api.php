@@ -5,6 +5,59 @@ require 'db.php';
 
 $action = $_GET['action'] ?? '';
 
+// Endpoint para testar envio de mensagens do webhook
+if ($action === 'test_webhook_message') {
+    $number = $_GET['number'] ?? '';
+    $message = $_GET['message'] ?? '';
+    
+    if (empty($number) || empty($message)) {
+        echo json_encode(['status' => 'error', 'message' => 'Parâmetros número e message são obrigatórios']);
+        exit;
+    }
+    
+    // Simular payload da Evolution API
+    $payload = [
+        'event' => 'messages.upsert',
+        'instance' => 'claus',
+        'data' => [
+            'key' => [
+                'remoteJid' => $number . '@s.whatsapp.net',
+                'fromMe' => isset($_GET['fromMe']) ? (bool)$_GET['fromMe'] : false,
+                'id' => 'TEST_' . strtoupper(bin2hex(random_bytes(5)))
+            ],
+            'pushName' => $_GET['pushName'] ?? 'Teste',
+            'message' => [
+                'conversation' => $message
+            ]
+        ]
+    ];
+    
+    // Chamar webhook
+    $dir = rtrim(dirname($_SERVER['PHP_SELF']), '/\\');
+    $url = (isset($_SERVER['HTTPS']) ? "https" : "http") . "://" . $_SERVER['HTTP_HOST'] . $dir . '/webhook.php';
+    
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
+    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $error = curl_error($ch);
+    curl_close($ch);
+    
+    echo json_encode([
+        'status' => 'sent',
+        'message' => 'Webhook chamado para teste',
+        'http_code' => $httpCode,
+        'response' => $response,
+        'error' => $error ?: null
+    ]);
+    exit;
+}
+
 switch ($action) {
     case 'check_db_status':
         try {
