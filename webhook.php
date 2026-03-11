@@ -481,29 +481,46 @@ try {
                 $stmt->execute([$newVal]);
                 $aiResponse = str_replace($matches[0], "🤖 Info agente atualizada!", $aiResponse);
             }
-            // Enviar Mensagem para Outro Número
+            // Enviar Mensagem para Outro Número (suporta múltiplas mensagens)
             if (preg_match('/\[SEND_MESSAGE:\s*(.*?),\s*(.*?)\]/s', $aiResponse, $matches)) {
                 $rawNumber = trim($matches[1]);
                 $messageToSend = trim($matches[2]);
-                
+                // remover aspas envolventes caso existam
+                $messageToSend = trim($messageToSend, " \t\n\r\0\x0B\"'");
+
                 // Formatação do número: remover caracteres não numéricos e garantir formato internacional
                 $targetNumber = preg_replace('/\D/', '', $rawNumber);
-                
                 // Se o número começar com 0, remover (ex: 019...)
                 if (strpos($targetNumber, '0') === 0) {
                     $targetNumber = substr($targetNumber, 1);
                 }
-                
                 // Se o número tiver 10 ou 11 dígitos (sem 55), adicionar 55 (Brasil)
                 if (strlen($targetNumber) == 10 || strlen($targetNumber) == 11) {
                     $targetNumber = '55' . $targetNumber;
                 }
-                // Se já tiver 55 ou for internacional, manter como está
-                
+
                 logEvent("Tentando enviar via comando SEND_MESSAGE para: $targetNumber");
-                $sent = sendWhatsApp($evolution_url, $evolution_apikey, $targetNumber, $messageToSend);
-                if ($sent) {
-                    $aiResponse = str_replace($matches[0], "📲 Mensagem enviada para $targetNumber!", $aiResponse);
+
+                // dividir em potenciais múltiplas mensagens
+                $parts = preg_split('/[\r\n]+/', $messageToSend);
+                $sentCount = 0;
+                foreach ($parts as $part) {
+                    $part = trim($part);
+                    if ($part === '') continue;
+                    // dividir ainda por sentenças pontuadas para humanizar
+                    $submsgs = preg_split('/(?<=[\?\!\.]\s+)/', $part);
+                    foreach ($submsgs as $sub) {
+                        $sub = trim($sub);
+                        if ($sub === '') continue;
+                        $result = sendWhatsApp($evolution_url, $evolution_apikey, $targetNumber, $sub);
+                        if ($result) {
+                            $sentCount++;
+                        }
+                    }
+                }
+
+                if ($sentCount > 0) {
+                    $aiResponse = str_replace($matches[0], "📲 Enviadas $sentCount mensagem(es) para $targetNumber!", $aiResponse);
                 } else {
                     $aiResponse = str_replace($matches[0], "❌ Falha ao enviar para $targetNumber. Verifique os logs.", $aiResponse);
                 }
