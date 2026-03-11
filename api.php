@@ -58,6 +58,26 @@ if ($action === 'test_webhook_message') {
     exit;
 }
 
+// Endpoint para diagnosticar status das APIs
+if ($action === 'api_status') {
+    $stmt = $conn->query("SELECT config_key, config_value FROM agent_config");
+    $configs = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+    
+    $status = [
+        'openai' => ['configured' => !empty($configs['openai_apikey'] ?? ''), 'key' => substr($configs['openai_apikey'] ?? '', 0, 10)],
+        'groq' => ['configured' => !empty($configs['groq_apikey'] ?? ''), 'key' => substr($configs['groq_apikey'] ?? '', 0, 10)],
+        'gemini' => ['configured' => !empty($configs['gemini_apikey'] ?? ''), 'key' => substr($configs['gemini_apikey'] ?? '', 0, 10)],
+        'claude' => ['configured' => !empty($configs['claude_apikey'] ?? ''), 'key' => substr($configs['claude_apikey'] ?? '', 0, 10)],
+        'huggingface' => ['configured' => !empty($configs['huggingface_apikey'] ?? ''), 'key' => substr($configs['huggingface_apikey'] ?? '', 0, 10)],
+        'together' => ['configured' => !empty($configs['together_apikey'] ?? ''), 'key' => substr($configs['together_apikey'] ?? '', 0, 10)],
+        'evolution_api' => ['configured' => !empty($configs['evolution_url'] ?? ''), 'url' => $configs['evolution_url'] ?? 'Não configurada'],
+        'current_provider' => $configs['ai_provider'] ?? 'openai'
+    ];
+    
+    echo json_encode($status);
+    exit;
+}
+
 switch ($action) {
     case 'check_db_status':
         try {
