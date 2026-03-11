@@ -12,7 +12,10 @@ require_once 'header.php';
             <div style="text-align: center; color: var(--text-secondary); margin-top: 20px;">Carregando conversa...</div>
         </div>
         <div class="chat-input-area">
-            <textarea id="chat-input" placeholder="Digite uma instrução ou mensagem para o Claus... (Enter para enviar, Shift+Enter para nova linha)" onkeydown="handleChatKey(event)"></textarea>
+            <div class="input-container">
+                <textarea id="chat-input" placeholder="Digite uma instrução ou mensagem para o Claus... (Enter para enviar, Shift+Enter para nova linha)" onkeydown="handleChatKey(event)"></textarea>
+                <button id="voice-btn" onclick="toggleVoiceRecording()" title="Gravar áudio" style="background: none; border: none; color: var(--text-secondary); font-size: 18px; cursor: pointer; margin-right: 8px;">🎤</button>
+            </div>
             <button onclick="sendMessage()">Enviar</button>
         </div>
     </div>
@@ -113,6 +116,76 @@ require_once 'header.php';
         loadChat();
         setInterval(loadChat, 5000);
     });
+
+    // Variáveis para gravação de áudio
+    let mediaRecorder = null;
+    let audioChunks = [];
+    let isRecording = false;
+
+    async function toggleVoiceRecording() {
+        const voiceBtn = document.getElementById('voice-btn');
+        
+        if (isRecording) {
+            // Parar gravação
+            mediaRecorder.stop();
+            voiceBtn.innerHTML = '🎤';
+            voiceBtn.classList.remove('recording');
+            voiceBtn.title = 'Gravar áudio';
+            isRecording = false;
+        } else {
+            // Iniciar gravação
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream);
+                audioChunks = [];
+                
+                mediaRecorder.ondataavailable = (event) => {
+                    audioChunks.push(event.data);
+                };
+                
+                mediaRecorder.onstop = async () => {
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                    await sendAudioMessage(audioBlob);
+                    
+                    // Parar todos os tracks do stream
+                    stream.getTracks().forEach(track => track.stop());
+                };
+                
+                mediaRecorder.start();
+                voiceBtn.innerHTML = '⏹️';
+                voiceBtn.classList.add('recording');
+                voiceBtn.title = 'Parar gravação';
+                isRecording = true;
+                
+            } catch (error) {
+                console.error('Erro ao acessar microfone:', error);
+                alert('Erro ao acessar microfone. Verifique as permissões.');
+            }
+        }
+    }
+
+    async function sendAudioMessage(audioBlob) {
+        const formData = new FormData();
+        formData.append('audio', audioBlob, 'audio.wav');
+        
+        try {
+            const response = await fetch('api.php?action=send_voice_message', {
+                method: 'POST',
+                body: formData
+            });
+            
+            const result = await response.json();
+            if (result.status === 'success') {
+                await loadChat();
+                scrollToBottom();
+            } else {
+                alert('Erro ao enviar áudio: ' + result.message);
+            }
+        } catch (error) {
+            console.error('Erro ao enviar áudio:', error);
+            alert('Erro ao enviar áudio para o agente.');
+        }
+    }
 </script>
 
 <?php require 'footer.php'; ?>

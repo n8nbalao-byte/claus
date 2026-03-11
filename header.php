@@ -92,6 +92,11 @@ $current_page = basename($_SERVER['PHP_SELF'], ".php");
         .log-status { padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; text-transform: uppercase; }
         .status-sent { background-color: rgba(45, 206, 137, 0.1); color: var(--success); }
         .status-pending { background-color: rgba(251, 99, 64, 0.1); color: var(--warning); }
+        .status-processing { background-color: rgba(0, 123, 255, 0.1); color: var(--info); }
+        .status-failed { background-color: rgba(220, 53, 69, 0.1); color: var(--danger); }
+        /* spinner for processing indicator */
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite; vertical-align: middle; margin-right: 4px; }
         .provider-btn { background: none; border: 1px solid var(--border-color); color: var(--text-primary); padding: 8px 16px; border-radius: 6px; cursor: pointer; }
         .provider-btn.active { background-color: var(--primary); color: white; border-color: var(--primary); }
 
@@ -102,9 +107,12 @@ $current_page = basename($_SERVER['PHP_SELF'], ".php");
         .message.admin { align-self: flex-end; background: var(--primary); color: white; border-bottom-right-radius: 2px; }
         .message.agent { align-self: flex-start; background: var(--bg-color); color: var(--text-primary); border: 1px solid var(--border-color); border-bottom-left-radius: 2px; }
         .message-info { font-size: 10px; margin-top: 5px; opacity: 0.7; display: block; }
-        .chat-input-area { padding: 20px; border-top: 1px solid var(--border-color); display: flex; gap: 10px; background: var(--card-bg); align-items: flex-end; }
-        .chat-input-area textarea { margin-bottom: 0; flex: 1; resize: none; min-height: 45px; max-height: 150px; padding: 12px; }
-        .chat-input-area button { height: 45px; padding: 0 25px; }
+
+        /* Estilos para entrada de voz */
+        .input-container { display: flex; align-items: flex-end; gap: 8px; }
+        .chat-input-area textarea { flex: 1; }
+        #voice-btn.recording { color: var(--danger); animation: pulse 1s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
     </style>
 </head>
 <body>

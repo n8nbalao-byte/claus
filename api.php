@@ -49,6 +49,46 @@ switch ($action) {
             $stmt->execute([$data['groq_model'], $data['groq_model']]);
         }
 
+        // Salvar configs do Gemini
+        if (isset($data['gemini_apikey'])) {
+            $stmt = $conn->prepare("INSERT INTO agent_config (config_key, config_value) VALUES ('gemini_apikey', ?) ON DUPLICATE KEY UPDATE config_value = ?");
+            $stmt->execute([$data['gemini_apikey'], $data['gemini_apikey']]);
+        }
+        if (isset($data['gemini_model'])) {
+            $stmt = $conn->prepare("INSERT INTO agent_config (config_key, config_value) VALUES ('gemini_model', ?) ON DUPLICATE KEY UPDATE config_value = ?");
+            $stmt->execute([$data['gemini_model'], $data['gemini_model']]);
+        }
+
+        // Salvar configs do Claude
+        if (isset($data['claude_apikey'])) {
+            $stmt = $conn->prepare("INSERT INTO agent_config (config_key, config_value) VALUES ('claude_apikey', ?) ON DUPLICATE KEY UPDATE config_value = ?");
+            $stmt->execute([$data['claude_apikey'], $data['claude_apikey']]);
+        }
+        if (isset($data['claude_model'])) {
+            $stmt = $conn->prepare("INSERT INTO agent_config (config_key, config_value) VALUES ('claude_model', ?) ON DUPLICATE KEY UPDATE config_value = ?");
+            $stmt->execute([$data['claude_model'], $data['claude_model']]);
+        }
+
+        // Salvar configs do HuggingFace
+        if (isset($data['huggingface_apikey'])) {
+            $stmt = $conn->prepare("INSERT INTO agent_config (config_key, config_value) VALUES ('huggingface_apikey', ?) ON DUPLICATE KEY UPDATE config_value = ?");
+            $stmt->execute([$data['huggingface_apikey'], $data['huggingface_apikey']]);
+        }
+        if (isset($data['huggingface_model'])) {
+            $stmt = $conn->prepare("INSERT INTO agent_config (config_key, config_value) VALUES ('huggingface_model', ?) ON DUPLICATE KEY UPDATE config_value = ?");
+            $stmt->execute([$data['huggingface_model'], $data['huggingface_model']]);
+        }
+
+        // Salvar configs do Together AI
+        if (isset($data['together_apikey'])) {
+            $stmt = $conn->prepare("INSERT INTO agent_config (config_key, config_value) VALUES ('together_apikey', ?) ON DUPLICATE KEY UPDATE config_value = ?");
+            $stmt->execute([$data['together_apikey'], $data['together_apikey']]);
+        }
+        if (isset($data['together_model'])) {
+            $stmt = $conn->prepare("INSERT INTO agent_config (config_key, config_value) VALUES ('together_model', ?) ON DUPLICATE KEY UPDATE config_value = ?");
+            $stmt->execute([$data['together_model'], $data['together_model']]);
+        }
+
         // Salvar campos de Identidade
         if (isset($data['usuario_info'])) {
             $stmt = $conn->prepare("INSERT INTO agent_config (config_key, config_value) VALUES ('usuario_info', ?) ON DUPLICATE KEY UPDATE config_value = ?");
@@ -92,6 +132,21 @@ switch ($action) {
     case 'get_contacts':
         $stmt = $conn->query("SELECT id, name, phone_number, relationship, notes FROM contacts ORDER BY name");
         echo json_encode($stmt->fetchAll(PDO::FETCH_ASSOC));
+        break;
+
+    case 'add_contact':
+        $data = json_decode(file_get_contents('php://input'), true);
+        if (empty($data['name']) || empty($data['phone'])) {
+            echo json_encode(['status' => 'error', 'message' => 'Nome e telefone são obrigatórios.']);
+            exit;
+        }
+        try {
+            $stmt = $conn->prepare("INSERT INTO contacts (name, phone_number, relationship, notes) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE relationship = VALUES(relationship), notes = VALUES(notes)");
+            $stmt->execute([$data['name'], $data['phone'], $data['relationship'] ?? '', $data['notes'] ?? '']);
+            echo json_encode(['status' => 'success', 'message' => 'Contato adicionado/atualizado!']);
+        } catch (PDOException $e) {
+            echo json_encode(['status' => 'error', 'message' => 'Erro ao adicionar contato: ' . $e->getMessage()]);
+        }
         break;
 
     case 'get_admin_chat':
@@ -151,6 +206,30 @@ switch ($action) {
         echo json_encode($stmt->fetchAll(PDO::FETCH_ASSOC));
         break;
 
+    case 'cancel_pending':
+        // marca todos os registros pendentes ou em processamento como falha para liberar a fila
+        $stmt = $conn->prepare("UPDATE agent_logs SET status = 'failed' WHERE status IN ('pending','processing')");
+        $stmt->execute();
+        $count = $stmt->rowCount();
+        echo json_encode(['status' => 'success', 'updated' => $count]);
+        break;
+
+    case 'clear_all_logs':
+        // Limpar todos os logs
+        $stmt = $conn->prepare("DELETE FROM agent_logs");
+        $stmt->execute();
+        $count = $stmt->rowCount();
+        echo json_encode(['status' => 'success', 'deleted' => $count]);
+        break;
+
+    case 'clear_all_chats':
+        // Limpar todos os logs de chat (mas manter dados de admin/sistema)
+        $stmt = $conn->prepare("DELETE FROM agent_logs WHERE sender_role IN ('user', 'agent', 'admin_manual')");
+        $stmt->execute();
+        $count = $stmt->rowCount();
+        echo json_encode(['status' => 'success', 'deleted' => $count]);
+        break;
+
     case 'send_manual_message':
         $data = json_decode(file_get_contents('php://input'), true);
         $number = $data['number'] ?? '';
@@ -184,8 +263,8 @@ switch ($action) {
 
         if ($sent) {
             // Logar a mensagem manual no banco de dados
-            $stmt_log = $conn->prepare("INSERT INTO agent_logs (sender_number, sender_role, message, agent_action, status) VALUES (?, 'admin_manual', ?, 'manual_reply', 'sent')");
-            $stmt_log->execute([$number, $signed_message]);
+            $stmt_log = $conn->prepare("INSERT INTO agent_logs (sender_number, sender_role, message, agent_action, status, timestamp) VALUES (?, 'admin_manual', ?, 'manual_reply', 'sent', ?)");
+            $stmt_log->execute([$number, $signed_message, getLocalTime()]);
             echo json_encode(['status' => 'success']);
         } else {
             echo json_encode(['status' => 'error', 'message' => 'Falha ao enviar a mensagem via Evolution API.']);
@@ -254,6 +333,95 @@ switch ($action) {
         echo json_encode(['status' => 'success', 'message' => 'Mensagem enviada para processamento.']);
         break;
 
+    case 'send_voice_message':
+        if (!isset($_FILES['audio'])) {
+            echo json_encode(['status' => 'error', 'message' => 'Arquivo de áudio não encontrado.']);
+            exit;
+        }
+
+        $audioFile = $_FILES['audio'];
+        
+        // Validar tipo do arquivo
+        $allowedTypes = ['audio/wav', 'audio/mpeg', 'audio/mp3', 'audio/ogg', 'audio/webm'];
+        if (!in_array($audioFile['type'], $allowedTypes)) {
+            echo json_encode(['status' => 'error', 'message' => 'Tipo de arquivo de áudio não suportado.']);
+            exit;
+        }
+
+        // Validar tamanho (máximo 25MB)
+        if ($audioFile['size'] > 25 * 1024 * 1024) {
+            echo json_encode(['status' => 'error', 'message' => 'Arquivo de áudio muito grande (máximo 25MB).']);
+            exit;
+        }
+
+        // Pegar configurações do OpenAI para transcrição
+        $stmt = $conn->query("SELECT config_key, config_value FROM agent_config WHERE config_key IN ('openai_apikey')");
+        $configs = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+        $openaiKey = $configs['openai_apikey'] ?? '';
+
+        if (empty($openaiKey)) {
+            echo json_encode(['status' => 'error', 'message' => 'API Key do OpenAI não configurada para transcrição de áudio.']);
+            exit;
+        }
+
+        // Transcrever o áudio usando OpenAI Whisper
+        $transcription = transcribeAudio($audioFile['tmp_name'], $openaiKey);
+        
+        if ($transcription === false) {
+            echo json_encode(['status' => 'error', 'message' => 'Erro ao transcrever o áudio.']);
+            exit;
+        }
+
+        // Pegar o primeiro admin cadastrado
+        $stmt = $conn->query("SELECT phone_number, name FROM admin_users LIMIT 1");
+        $admin = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+        if (!$admin) {
+            echo json_encode(['status' => 'error', 'message' => 'Usuário admin não encontrado no banco.']);
+            exit;
+        }
+        $admin_number = $admin['phone_number'];
+        $admin_name = $admin['name'];
+
+        // Montar payload simulando mensagem de voz transcrita
+        $payload = [
+            'event' => 'messages.upsert',
+            'instance' => 'claus',
+            'data' => [
+                'key' => [
+                    'remoteJid' => $admin_number . '@s.whatsapp.net',
+                    'fromMe' => false,
+                    'id' => 'VOICE_' . strtoupper(bin2hex(random_bytes(10)))
+                ],
+                'pushName' => $admin_name,
+                'message' => [
+                    'conversation' => '[🎤 Voz] ' . $transcription
+                ]
+            ]
+        ];
+
+        // Chamar o webhook.php localmente via cURL
+        $dir = rtrim(dirname($_SERVER['PHP_SELF']), '/\\');
+        $url = (isset($_SERVER['HTTPS']) ? "https" : "http") . "://" . $_SERVER['HTTP_HOST'] . $dir . '/webhook.php';
+
+        $ch = curl_init($url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+        curl_setopt($ch, CURLOPT_TIMEOUT_MS, 500);
+
+        $res = curl_exec($ch);
+        $err = curl_error($ch);
+        curl_close($ch);
+
+        if ($err && strpos($err, 'timeout') === false) {
+            file_put_contents('api_error.txt', date('Y-m-d H:i:s') . " - Erro cURL ao chamar webhook para voz: " . $err . "\n", FILE_APPEND);
+        }
+
+        echo json_encode(['status' => 'success', 'message' => 'Áudio transcrito e enviado para processamento.', 'transcription' => $transcription]);
+        break;
+
     default:
         echo json_encode(['status' => 'error', 'message' => 'Ação inválida.']);
         break;
@@ -264,7 +432,7 @@ function sendWhatsApp($url, $apiKey, $number, $text) {
     $data = [
         'number' => $number,
         'text' => $text,
-        'delay' => 1200
+        'delay' => 300  // Reduzido de 1200ms para 300ms
     ];
 
     $ch = curl_init($url);
@@ -281,5 +449,43 @@ function sendWhatsApp($url, $apiKey, $number, $text) {
     curl_close($ch);
 
     return ($httpCode >= 200 && $httpCode < 300);
+}
+
+function transcribeAudio($audioFilePath, $apiKey) {
+    $url = 'https://api.openai.com/v1/audio/transcriptions';
+    
+    $postData = [
+        'file' => new CURLFile($audioFilePath, 'audio/wav', 'audio.wav'),
+        'model' => 'whisper-1',
+        'language' => 'pt'  // Português do Brasil
+    ];
+    
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $postData);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Authorization: Bearer ' . $apiKey
+    ]);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 60); // Timeout maior para transcrição
+    
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    
+    if (curl_errno($ch)) {
+        error_log('Erro cURL na transcrição: ' . curl_error($ch));
+        curl_close($ch);
+        return false;
+    }
+    
+    curl_close($ch);
+    
+    if ($httpCode !== 200) {
+        error_log('Erro na API do OpenAI: HTTP ' . $httpCode . ' - ' . $response);
+        return false;
+    }
+    
+    $result = json_decode($response, true);
+    return $result['text'] ?? false;
 }
 ?>
