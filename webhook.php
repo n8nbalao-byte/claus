@@ -22,7 +22,9 @@ if (isset($_GET['test'])) {
 function logEvent($message, $isError = false) {
     $dir = __DIR__;
     $file = $isError ? $dir . DIRECTORY_SEPARATOR . 'webhook_error.txt' : $dir . DIRECTORY_SEPARATOR . 'webhook_log.txt';
-    file_put_contents($file, date('Y-m-d H:i:s') . " - " . $message . "\n", FILE_APPEND);
+    // Usar offset -3 horas para São Paulo (UTC-3)
+    $timestamp = date('Y-m-d H:i:s', time() - 3*3600);
+    file_put_contents($file, $timestamp . " - " . $message . "\n", FILE_APPEND);
 }
 
 // Carregar conexão com banco de dados
@@ -90,10 +92,31 @@ try {
     $isAdminCheck = $stmt->fetch();
     $roleToSave = $isAdminCheck ? 'admin' : 'user';
 
-    $stmt = $conn->prepare("INSERT INTO agent_logs (sender_number, sender_role, message, agent_action, status) VALUES (?, ?, ?, 'received', 'pending')");
-    $stmt->execute([$number, $roleToSave, $messageText]);
+    $stmt = $conn->prepare("INSERT INTO agent_logs (sender_number, sender_role, message, agent_action, status, timestamp) VALUES (?, ?, ?, 'received', 'pending', ?)");
+    $stmt->execute([$number, $roleToSave, $messageText, getLocalTime()]);
 } catch (Exception $e) {
     logEvent("Erro ao salvar log inicial: " . $e->getMessage(), true);
+}
+
+// --- GERENCIAMENTO DE SESSÕES ---
+$session_id = $remoteJid; // Usar remoteJid como session_id
+try {
+    // Verificar se já existe uma sessão ativa
+    $stmt_session = $conn->prepare("SELECT current_state FROM active_sessions WHERE session_id = ?");
+    $stmt_session->execute([$session_id]);
+    $existing_session = $stmt_session->fetch(PDO::FETCH_ASSOC);
+
+    if (!$existing_session) {
+        // Criar nova sessão se não existir
+        $stmt_insert = $conn->prepare("INSERT INTO active_sessions (session_id, remote_jid, current_state) VALUES (?, ?, 'ANALYZING_REQUEST')");
+        $stmt_insert->execute([$session_id, $remoteJid]);
+        logEvent("Nova sessão criada para $remoteJid");
+    } else {
+        // Sessão já existe, manter estado atual
+        logEvent("Sessão existente para $remoteJid, estado: " . $existing_session['current_state']);
+    }
+} catch (Exception $e) {
+    logEvent("Erro ao gerenciar sessão: " . $e->getMessage(), true);
 }
 
 // 2. Verificar se já existe um processo de espera rodando para este número
@@ -131,7 +154,7 @@ ignore_user_abort(true);
 set_time_limit(120);
 
 // 5. Loop de espera (Aguardar o usuário parar de digitar)
-$wait_seconds = 12; // Tempo total de espera (ajustado de 8 para 12)
+$wait_seconds = 3; // Reduzido de 12 para 3 segundos para resposta mais rápida
 sleep($wait_seconds);
 
 // 6. Buscar todas as mensagens pendentes deste número para processar de uma vez
@@ -176,6 +199,29 @@ try {
     
     $prompt = $configs['main_prompt'] ?? "Você é um assistente útil.";
     $provider = $configs['ai_provider'] ?? 'openai';
+    $groq_apikey = $configs['groq_apikey'] ?? '';
+    $groq_model = $configs['groq_model'] ?? 'llama-3.3-70b-versatile';
+    $gemini_apikey = $configs['gemini_apikey'] ?? '';
+    $gemini_model = $configs['gemini_model'] ?? 'gemini-1.5-flash';
+    $claude_apikey = $configs['claude_apikey'] ?? '';
+    $claude_model = $configs['claude_model'] ?? 'claude-3-haiku-20240307';
+    $huggingface_apikey = $configs['huggingface_apikey'] ?? '';
+    $huggingface_model = $configs['huggingface_model'] ?? 'microsoft/DialoGPT-medium';
+    $together_apikey = $configs['together_apikey'] ?? '';
+    $together_model = $configs['together_model'] ?? 'meta-llama/Llama-3.3-70B-Instruct-Turbo';
+    $openai_apikey = $configs['openai_apikey'] ?? '';
+    $openai_model = $configs['openai_model'] ?? 'gpt-4o-mini';
+    $evolution_url = $configs['evolution_url'] ?? 'http://72.61.56.104:63633/message/sendText/claus';
+    $evolution_apikey = $configs['evolution_apikey'] ?? '185BD7822A0E-4C76-AF03-82957D439B1D';
+
+    logEvent("=== INÍCIO PROCESSAMENTO ===");
+    logEvent("Mensagem: '$messageText' de $userName ($role)");
+    logEvent("Provider: $provider, OpenAI Key: " . (!empty($openai_apikey) ? 'Configurada' : 'Vazia'));
+    logEvent("Groq Key: " . (!empty($groq_apikey) ? 'Configurada' : 'Vazia'));
+    logEvent("Gemini Key: " . (!empty($gemini_apikey) ? 'Configurada' : 'Vazia'));
+    logEvent("Claude Key: " . (!empty($claude_apikey) ? 'Configurada' : 'Vazia'));
+    logEvent("HuggingFace Key: " . (!empty($huggingface_apikey) ? 'Configurada' : 'Vazia'));
+    logEvent("Together AI Key: " . (!empty($together_apikey) ? 'Configurada' : 'Vazia'));
     
     $usuario_info = $configs['usuario_info'] ?? '';
     $agente_info = $configs['agente_info'] ?? '';
@@ -207,19 +253,23 @@ try {
     $userName = $admin ? $admin['name'] : $pushName;
 
     // --- VERIFICAR SE O AGENTE ESTÁ SILENCIADO (MUTE) ---
-    // Se o admin interveio nos últimos 20 minutos, o Claus fica calado para este número.
-    $mute_key = "mute_agent_" . $number;
-    $stmt = $conn->prepare("SELECT config_value FROM agent_config WHERE config_key = ?");
-    $stmt->execute([$mute_key]);
-    $last_intervention = $stmt->fetchColumn();
-    
-    if ($last_intervention && (time() - (int)$last_intervention) < (20 * 60)) {
-        logEvent("Agente silenciado para $number devido à intervenção recente do Admin.");
-        // Marcar mensagem como processada (mas sem resposta do agente)
-        $placeholders = implode(',', array_fill(0, count($msg_ids), '?'));
-        $stmt = $conn->prepare("UPDATE agent_logs SET status = 'muted' WHERE id IN ($placeholders)");
-        $stmt->execute($msg_ids);
-        exit;
+    // Se o admin interveio nos últimos 20 minutos, o Claus fica calado APENAS para números que NÃO sejam do admin.
+    if (!$isAdmin) {
+        $mute_key = "mute_agent_" . $number;
+        $stmt = $conn->prepare("SELECT config_value FROM agent_config WHERE config_key = ?");
+        $stmt->execute([$mute_key]);
+        $last_intervention = $stmt->fetchColumn();
+        
+        if ($last_intervention && (time() - (int)$last_intervention) < (20 * 60)) {
+            logEvent("Agente silenciado para $number devido à intervenção recente do Admin.");
+            // Marcar mensagem como processada (mas sem resposta do agente)
+            $placeholders = implode(',', array_fill(0, count($msg_ids), '?'));
+            $stmt = $conn->prepare("UPDATE agent_logs SET status = 'muted' WHERE id IN ($placeholders)");
+            $stmt->execute($msg_ids);
+            exit;
+        }
+    } else {
+        logEvent("Admin detectado - ignorando pausa de 20 minutos, respondendo sempre.");
     }
 
     logEvent("Identificado como: $role ($userName) - Número: $number");
@@ -277,11 +327,22 @@ try {
         $systemPrompt .= "- [POST_STATUS: texto] -> Publica EXATAMENTE o texto fornecido no seu status do WhatsApp.\n";
         $systemPrompt .= "- [SEARCH_CONTACTS: termo] -> Busca contatos por nome ou nota.\n";
         $systemPrompt .= "- [SEARCH_LOGS: termo] -> Busca no histórico de conversas (logs).\n";
+        $systemPrompt .= "- [ADD_CONTACT: nome, telefone, relação, notas] -> Adiciona um novo contato à memória.\n";
+        $systemPrompt .= "- [SAVE_BUSINESS_RULE: key, value, description] -> Salva uma regra de negócio.\n";
+        $systemPrompt .= "- [SEARCH_CONTACT: relationship, search_term] -> Busca contato por relação e termo.\n";
+        $systemPrompt .= "- [SCHEDULE_TASK: cron_expression, task_description] -> Agenda uma tarefa recorrente.\n";
+        $systemPrompt .= "- [LOG_EVENT: event_type, details_json] -> Registra um evento importante.\n";
         
         $systemPrompt .= "\nSempre mantenha as informações anteriores ao atualizar USUÁRIO ou AGENTE, a menos que seja uma correção. Adicione novas informações ao contexto existente.\n";
         $systemPrompt .= $contacts_context;
     } else {
-        $systemPrompt .= "Este é um cliente/usuário comum. Siga estritamente suas diretrizes de atendimento. Assine todas as suas respostas com seu nome, por exemplo: 'Claus: Olá, como posso ajudar?'";
+        $systemPrompt .= "Este é um cliente/usuário comum. Você é o Assistente do [Nome do Admin], focado em vendas e suporte.\n";
+        $systemPrompt .= "- Identifique intenções de compra (ex: 'quero HD') e inicie o fluxo de intermediação.\n";
+        $systemPrompt .= "- Use [SEARCH_CONTACT] para fornecedores/motoboys.\n";
+        $systemPrompt .= "- Calcule preços aplicando regras de negócio (margens).\n";
+        $systemPrompt .= "- Atualize active_sessions conforme o estado.\n";
+        $systemPrompt .= "- Use [LOG_EVENT] para registrar vendas.\n";
+        $systemPrompt .= "- Responda de forma educada e proativa, assinando como 'Claus:'.\n";
     }
     
     $aiResponse = null;
@@ -292,11 +353,45 @@ try {
         } else {
             logEvent("Usando Groq ($groq_model)...");
             $aiResponse = callGroq($groq_apikey, $groq_model, $systemPrompt, $history);
+            logEvent("Resposta Groq recebida: " . substr($aiResponse ?? 'NULL', 0, 100));
+        }
+    } elseif ($provider === 'gemini') {
+        if (empty($gemini_apikey)) {
+            logEvent("ERRO: Provedor Gemini selecionado, mas sem chave API.", true);
+        } else {
+            logEvent("Usando Gemini ($gemini_model)...");
+            $aiResponse = callGemini($gemini_apikey, $gemini_model, $systemPrompt, $history);
+            logEvent("Resposta Gemini recebida: " . substr($aiResponse ?? 'NULL', 0, 100));
+        }
+    } elseif ($provider === 'claude') {
+        if (empty($claude_apikey)) {
+            logEvent("ERRO: Provedor Claude selecionado, mas sem chave API.", true);
+        } else {
+            logEvent("Usando Claude ($claude_model)...");
+            $aiResponse = callClaude($claude_apikey, $claude_model, $systemPrompt, $history);
+            logEvent("Resposta Claude recebida: " . substr($aiResponse ?? 'NULL', 0, 100));
+        }
+    } elseif ($provider === 'huggingface') {
+        if (empty($huggingface_apikey)) {
+            logEvent("ERRO: Provedor HuggingFace selecionado, mas sem chave API.", true);
+        } else {
+            logEvent("Usando HuggingFace ($huggingface_model)...");
+            $aiResponse = callHuggingFace($huggingface_apikey, $huggingface_model, $systemPrompt, $history);
+            logEvent("Resposta HuggingFace recebida: " . substr($aiResponse ?? 'NULL', 0, 100));
+        }
+    } elseif ($provider === 'together') {
+        if (empty($together_apikey)) {
+            logEvent("ERRO: Provedor Together AI selecionado, mas sem chave API.", true);
+        } else {
+            logEvent("Usando Together AI ($together_model)...");
+            $aiResponse = callTogether($together_apikey, $together_model, $systemPrompt, $history);
+            logEvent("Resposta Together AI recebida: " . substr($aiResponse ?? 'NULL', 0, 100));
         }
     } else {
         // Default OpenAI
         logEvent("Usando OpenAI ($openai_model)...");
         $aiResponse = callOpenAI($openai_apikey, $openai_model, $systemPrompt, $history);
+        logEvent("Resposta OpenAI recebida: " . substr($aiResponse ?? 'NULL', 0, 100));
     }
 
     if ($aiResponse) {
@@ -399,10 +494,11 @@ try {
                     $targetNumber = substr($targetNumber, 1);
                 }
                 
-                // Se o número tiver 10 ou 11 dígitos, adicionar 55 (Brasil)
+                // Se o número tiver 10 ou 11 dígitos (sem 55), adicionar 55 (Brasil)
                 if (strlen($targetNumber) == 10 || strlen($targetNumber) == 11) {
                     $targetNumber = '55' . $targetNumber;
                 }
+                // Se já tiver 55 ou for internacional, manter como está
                 
                 logEvent("Tentando enviar via comando SEND_MESSAGE para: $targetNumber");
                 $sent = sendWhatsApp($evolution_url, $evolution_apikey, $targetNumber, $messageToSend);
@@ -423,9 +519,102 @@ try {
                     $aiResponse = str_replace($matches[0], "❌ Falha ao publicar o status. Verifique os logs.", $aiResponse);
                 }
             }
+            // Adicionar Contato
+            if (preg_match('/\[ADD_CONTACT:\s*(.*?),\s*(.*?),\s*(.*?),\s*(.*?)\]/s', $aiResponse, $matches)) {
+                $name = trim($matches[1]);
+                $phone = trim($matches[2]);
+                $relationship = trim($matches[3]);
+                $notes = trim($matches[4]);
+                
+                try {
+                    $stmt = $conn->prepare("INSERT INTO contacts (name, phone_number, relationship, notes) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE relationship = VALUES(relationship), notes = VALUES(notes)");
+                    $stmt->execute([$name, $phone, $relationship, $notes]);
+                    $aiResponse = str_replace($matches[0], "📞 Contato '$name' adicionado/atualizado!", $aiResponse);
+                } catch (Exception $e) {
+                    logEvent("Erro ao adicionar contato: " . $e->getMessage(), true);
+                    $aiResponse = str_replace($matches[0], "❌ Erro ao adicionar contato.", $aiResponse);
+                }
+            }
+            // Salvar Regra de Negócio
+            if (preg_match('/\[SAVE_BUSINESS_RULE:\s*(.*?),\s*(.*?),\s*(.*?)\]/s', $aiResponse, $matches)) {
+                $key = trim($matches[1]);
+                $value = trim($matches[2]);
+                $description = trim($matches[3]);
+                
+                try {
+                    $stmt = $conn->prepare("INSERT INTO business_rules (rule_key, rule_value, description) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE rule_value = VALUES(rule_value), description = VALUES(description)");
+                    $stmt->execute([$key, $value, $description]);
+                    $aiResponse = str_replace($matches[0], "📋 Regra '$key' salva!", $aiResponse);
+                } catch (Exception $e) {
+                    logEvent("Erro ao salvar regra: " . $e->getMessage(), true);
+                    $aiResponse = str_replace($matches[0], "❌ Erro ao salvar regra.", $aiResponse);
+                }
+            }
+            // Buscar Contato por Relação
+            if (preg_match('/\[SEARCH_CONTACT:\s*(.*?),\s*(.*?)\]/s', $aiResponse, $matches)) {
+                $relationship = trim($matches[1]);
+                $search_term = trim($matches[2]);
+                
+                $stmt = $conn->prepare("SELECT name, phone_number, relationship, notes FROM contacts WHERE relationship LIKE ? AND (name LIKE ? OR notes LIKE ?)");
+                $stmt->execute(["%$relationship%", "%$search_term%", "%$search_term%"]);
+                $results = $stmt->fetchAll(PDO::FETCH_ASSOC);
+                
+                $extra_context = "\n\n🔍 RESULTADOS DA BUSCA (CONTATO - '$relationship', '$search_term'):\n";
+                if ($results) {
+                    foreach ($results as $c) {
+                        $extra_context .= "- {$c['name']}: {$c['phone_number']} ({$c['relationship']}) {$c['notes']}\n";
+                    }
+                } else {
+                    $extra_context .= "Nenhum contato encontrado.";
+                }
+                $needs_rethink = true;
+                // Adicionar ao histórico para reavaliação
+                $history[] = ['role' => 'assistant', 'content' => $aiResponse];
+                $history[] = ['role' => 'system', 'content' => $extra_context . "\nUse os dados para prosseguir."];
+                
+                // Chamar IA novamente
+                if ($provider === 'groq') {
+                    $aiResponse = callGroq($groq_apikey, $groq_model, $systemPrompt, $history);
+                } else {
+                    $aiResponse = callOpenAI($openai_apikey, $openai_model, $systemPrompt, $history);
+                }
+            }
+            // Agendar Tarefa
+            if (preg_match('/\[SCHEDULE_TASK:\s*(.*?),\s*(.*?)\]/s', $aiResponse, $matches)) {
+                $cron = trim($matches[1]);
+                $description = trim($matches[2]);
+                
+                try {
+                    $stmt = $conn->prepare("INSERT INTO scheduled_tasks (cron_expression, task_description) VALUES (?, ?)");
+                    $stmt->execute([$cron, $description]);
+                    $aiResponse = str_replace($matches[0], "⏰ Tarefa agendada!", $aiResponse);
+                } catch (Exception $e) {
+                    logEvent("Erro ao agendar tarefa: " . $e->getMessage(), true);
+                    $aiResponse = str_replace($matches[0], "❌ Erro ao agendar tarefa.", $aiResponse);
+                }
+            }
+            // Logar Evento
+            if (preg_match('/\[LOG_EVENT:\s*(.*?),\s*(.*?)\]/s', $aiResponse, $matches)) {
+                $event_type = trim($matches[1]);
+                $details_json = trim($matches[2]);
+                
+                try {
+                    $stmt = $conn->prepare("INSERT INTO recent_events (event_type, event_details) VALUES (?, ?)");
+                    $stmt->execute([$event_type, $details_json]);
+                    $aiResponse = str_replace($matches[0], "📝 Evento '$event_type' registrado!", $aiResponse);
+                } catch (Exception $e) {
+                    logEvent("Erro ao logar evento: " . $e->getMessage(), true);
+                    $aiResponse = str_replace($matches[0], "❌ Erro ao registrar evento.", $aiResponse);
+                }
+            }
         }
 
         // 5. Enviar resposta via Evolution API
+        // garantir assinatura Claus
+        if (!preg_match('/^\*(Claus|claus):\*/', $aiResponse)) {
+            $aiResponse = "*Claus:* " . $aiResponse;
+        }
+        logEvent("Enviando resposta para $number: " . substr($aiResponse, 0, 100));
         $sent = sendWhatsApp($evolution_url, $evolution_apikey, $number, $aiResponse);
         $status = $sent ? 'sent' : 'failed';
         
@@ -435,9 +624,24 @@ try {
             logEvent("FALHA ao enviar para WhatsApp.", true);
         }
 
+        // Atualizar sessão se aplicável
+        if (!$isAdmin) {
+            // Lógica simples: se resposta contém palavras-chave, atualizar estado
+            $new_state = 'IDLE';
+            if (strpos($aiResponse, 'consultar') !== false) {
+                $new_state = 'WAITING_SUPPLIER_RESPONSE';
+            } elseif (strpos($aiResponse, 'endereço') !== false) {
+                $new_state = 'WAITING_CUSTOMER_CONFIRMATION';
+            } elseif (strpos($aiResponse, 'motoboy') !== false) {
+                $new_state = 'ARRANGING_DELIVERY';
+            }
+            $stmt_update_session = $conn->prepare("UPDATE active_sessions SET current_state = ?, updated_at = ? WHERE session_id = ?");
+            $stmt_update_session->execute([$new_state, getLocalTime(), $session_id]);
+        }
+
         // 6. Logar a resposta enviada no DB
-        $stmt = $conn->prepare("INSERT INTO agent_logs (sender_number, sender_role, message, agent_action, status) VALUES (?, 'agent', ?, 'replied', ?)");
-        $stmt->execute([$number, $aiResponse, $status]);
+        $stmt = $conn->prepare("INSERT INTO agent_logs (sender_number, sender_role, message, agent_action, status, timestamp) VALUES (?, 'agent', ?, 'replied', ?, ?)");
+        $stmt->execute([$number, $aiResponse, $status, getLocalTime()]);
     } else {
         logEvent("FALHA: A IA (Provedor: $provider) retornou resposta vazia ou nula. Verifique as chaves de API e limites.", true);
     }
@@ -469,14 +673,9 @@ function callOpenAI($apiKey, $model, $system, $history) {
         'Content-Type: application/json',
         'Authorization: Bearer ' . $apiKey
     ]);
-
-    $response = curl_exec($ch);
-    
-    if (curl_errno($ch)) {
-        logEvent('Erro cURL OpenAI: ' . curl_error($ch), true);
-        curl_close($ch);
-        return null;
-    }
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_NOSIGNAL, 1);
     
     curl_close($ch);
 
@@ -517,6 +716,9 @@ function callGroq($apiKey, $model, $system, $history) {
         'Content-Type: application/json',
         'Authorization: Bearer ' . $apiKey
     ]);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_NOSIGNAL, 1);
 
     $response = curl_exec($ch);
     
@@ -543,11 +745,217 @@ function callGroq($apiKey, $model, $system, $history) {
     return $json['choices'][0]['message']['content'] ?? null;
 }
 
+function callGemini($apiKey, $model, $system, $history) {
+    $url = 'https://generativelanguage.googleapis.com/v1beta/models/' . $model . ':generateContent?key=' . $apiKey;
+
+    // Converter histórico para formato Gemini
+    $contents = [];
+    $contents[] = ['role' => 'user', 'parts' => [['text' => $system]]];
+    $contents[] = ['role' => 'model', 'parts' => [['text' => 'Entendido. Vou seguir essas instruções.']]];
+
+    foreach ($history as $msg) {
+        $role = $msg['role'] === 'assistant' ? 'model' : 'user';
+        $contents[] = ['role' => $role, 'parts' => [['text' => $msg['content']]]];
+    }
+
+    $data = [
+        'contents' => $contents,
+        'generationConfig' => [
+            'temperature' => 0.7,
+            'maxOutputTokens' => 2048
+        ]
+    ];
+
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Content-Type: application/json'
+    ]);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_NOSIGNAL, 1);
+
+    $response = curl_exec($ch);
+
+    if (curl_errno($ch)) {
+        logEvent('Erro cURL Gemini: ' . curl_error($ch), true);
+        curl_close($ch);
+        return null;
+    }
+
+    curl_close($ch);
+
+    $json = json_decode($response, true);
+
+    if (isset($json['error'])) {
+        logEvent('Erro API Gemini: ' . json_encode($json['error']), true);
+        return null;
+    }
+
+    return $json['candidates'][0]['content']['parts'][0]['text'] ?? null;
+}
+
+function callClaude($apiKey, $model, $system, $history) {
+    $url = 'https://api.anthropic.com/v1/messages';
+
+    // Converter histórico para formato Claude
+    $messages = [];
+    foreach ($history as $msg) {
+        $role = $msg['role'] === 'assistant' ? 'assistant' : 'user';
+        $messages[] = ['role' => $role, 'content' => $msg['content']];
+    }
+
+    $data = [
+        'model' => $model,
+        'max_tokens' => 2048,
+        'system' => $system,
+        'messages' => $messages
+    ];
+
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Content-Type: application/json',
+        'x-api-key: ' . $apiKey,
+        'anthropic-version: 2023-06-01'
+    ]);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_NOSIGNAL, 1);
+
+    $response = curl_exec($ch);
+
+    if (curl_errno($ch)) {
+        logEvent('Erro cURL Claude: ' . curl_error($ch), true);
+        curl_close($ch);
+        return null;
+    }
+
+    curl_close($ch);
+
+    $json = json_decode($response, true);
+
+    if (isset($json['error'])) {
+        logEvent('Erro API Claude: ' . json_encode($json['error']), true);
+        return null;
+    }
+
+    return $json['content'][0]['text'] ?? null;
+}
+
+function callHuggingFace($apiKey, $model, $system, $history) {
+    $url = 'https://api-inference.huggingface.co/models/' . $model;
+
+    // Para modelos de conversação, usar o último input do usuário
+    $lastUserMessage = '';
+    foreach (array_reverse($history) as $msg) {
+        if ($msg['role'] === 'user') {
+            $lastUserMessage = $msg['content'];
+            break;
+        }
+    }
+
+    $data = [
+        'inputs' => $system . "\n\n" . $lastUserMessage,
+        'parameters' => [
+            'max_length' => 512,
+            'temperature' => 0.7
+        ]
+    ];
+
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Content-Type: application/json',
+        'Authorization: Bearer ' . $apiKey
+    ]);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_NOSIGNAL, 1);
+
+    $response = curl_exec($ch);
+
+    if (curl_errno($ch)) {
+        logEvent('Erro cURL HuggingFace: ' . curl_error($ch), true);
+        curl_close($ch);
+        return null;
+    }
+
+    curl_close($ch);
+
+    $json = json_decode($response, true);
+
+    if (isset($json['error'])) {
+        logEvent('Erro API HuggingFace: ' . json_encode($json), true);
+        return null;
+    }
+
+    // HuggingFace retorna array de objetos com 'generated_text'
+    if (is_array($json) && isset($json[0]['generated_text'])) {
+        return $json[0]['generated_text'];
+    }
+
+    return null;
+}
+
+function callTogether($apiKey, $model, $system, $history) {
+    $url = 'https://api.together.xyz/v1/chat/completions';
+
+    $messages = [['role' => 'system', 'content' => $system]];
+    foreach ($history as $msg) {
+        $messages[] = $msg;
+    }
+
+    $data = [
+        'model' => $model,
+        'messages' => $messages,
+        'max_tokens' => 2048,
+        'temperature' => 0.7
+    ];
+
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Content-Type: application/json',
+        'Authorization: Bearer ' . $apiKey
+    ]);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_NOSIGNAL, 1);
+
+    $response = curl_exec($ch);
+
+    if (curl_errno($ch)) {
+        logEvent('Erro cURL Together: ' . curl_error($ch), true);
+        curl_close($ch);
+        return null;
+    }
+
+    curl_close($ch);
+
+    $json = json_decode($response, true);
+
+    if (isset($json['error'])) {
+        logEvent('Erro API Together: ' . json_encode($json['error']), true);
+        return null;
+    }
+
+    return $json['choices'][0]['message']['content'] ?? null;
+}
+
 function sendWhatsApp($url, $apiKey, $number, $text) {
     $data = [
         'number' => $number,
         'text' => $text,
-        'delay' => 1200
+        'delay' => 300  // Reduzido de 1200ms para 300ms
     ];
 
     $ch = curl_init($url);
@@ -558,6 +966,8 @@ function sendWhatsApp($url, $apiKey, $number, $text) {
         'Content-Type: application/json',
         'apikey: ' . $apiKey
     ]);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 15);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5);
 
     $response = curl_exec($ch);
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
