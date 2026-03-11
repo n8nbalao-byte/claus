@@ -49,19 +49,6 @@ if (!isset($data['event']) || $data['event'] !== 'messages.upsert') {
     die('Evento ignorado');
 }
 
-// Extrair dados principais
-$msgData = $data['data'];
-$remoteJid = $msgData['key']['remoteJid'];
-
-// Ignorar atualizações de status
-if ($remoteJid === 'status@broadcast') {
-    die('Ignorado: Status@broadcast');
-}
-
-$fromMe = $msgData['key']['fromMe'];
-$number = explode('@', $remoteJid)[0];
-$pushName = $data['data']['pushName'] ?? 'Usuário';
-
 // Extrair texto da mensagem (necessário para distinguir comandos do bot)
 $messageText = '';
 if (isset($msgData['message']['conversation'])) {
@@ -70,15 +57,25 @@ if (isset($msgData['message']['conversation'])) {
     $messageText = $msgData['message']['extendedTextMessage']['text'];
 }
 
-// Ignorar certas mensagens do próprio bot, mas permitir input do admin mesmo com fromMe=true
-if ($fromMe) {
-    // se começar com Claus: ou for um aviso interno, não precisamos processar
-    if (preg_match('/^\*?Claus:/i', $messageText) || stripos($messageText, 'mensagem enviada para') !== false) {
-        die('Mensagem do bot, ignorando');
-    }
-    // caso contrário, trata-se de uma instrução digitada pelo admin no chat consigo mesmo
-    // continua o fluxo normalmente, marcando como admin mais adiante
+if (empty($messageText)) {
+    die('Mensagem sem texto');
 }
+
+logEvent("MENSAGEM DE $number: $messageText");
+
+// Verificar se é mensagem DO próprio bot (respostas que ele enviou)
+$isOwnBotResponse = false;
+if ($fromMe && (preg_match('/^\*?Claus:/i', $messageText) || stripos($messageText, 'mensagem enviada para') !== false)) {
+    $isOwnBotResponse = true;
+}
+
+// Se for resposta do próprio bot, ignorar (não processar novamente)
+if ($isOwnBotResponse) {
+    die('Resposta do bot, ignorando para evitar loop');
+}
+
+// Se for fromMe=true MAS não for resposta do bot, é um comando do admin para si mesmo
+// Continua processamento normal (será tratado como admin mais adiante)
 
 if (empty($messageText)) {
     die('Mensagem sem texto');

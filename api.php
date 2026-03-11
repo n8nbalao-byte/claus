@@ -291,6 +291,15 @@ switch ($action) {
         $admin_number = $admin['phone_number'];
         $admin_name = $admin['name'];
 
+        // SALVAR A MENSAGEM DO ADMIN NO BANCO antes de processar (para aparecer no chat)
+        try {
+            $stmt_log = $conn->prepare("INSERT INTO agent_logs (sender_number, sender_role, message, agent_action, status, timestamp) VALUES (?, 'admin', ?, 'sent_from_panel', 'processing', ?)");
+            $stmt_log->execute([$admin_number, $message, date('Y-m-d H:i:s')]);
+        } catch (Exception $e) {
+            // log error but continue
+            file_put_contents('api_error.txt', date('Y-m-d H:i:s') . " - Erro ao salvar msg do admin: " . $e->getMessage() . "\n", FILE_APPEND);
+        }
+
         // Montar um payload que simula o da Evolution API
         $payload = [
             'event' => 'messages.upsert',
