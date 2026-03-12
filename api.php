@@ -78,6 +78,16 @@ if ($action === 'api_status') {
     exit;
 }
 
+// ── CONFIG HELPER ────────────────────────────────────────────────
+function getConfigVal(PDO $conn, string $key): ?string {
+    try {
+        $s = $conn->prepare("SELECT config_value FROM agent_config WHERE config_key=? LIMIT 1");
+        $s->execute([$key]);
+        $v = $s->fetchColumn();
+        return $v !== false ? (string)$v : null;
+    } catch (Exception $e) { return null; }
+}
+
 switch ($action) {
     case 'check_db_status':
         try {
@@ -326,10 +336,12 @@ switch ($action) {
         $stmt_mute->execute([$mute_key, time()]);
 
         // Pegar configs da Evolution API
-        $stmt_config = $conn->query("SELECT config_key, config_value FROM agent_config WHERE config_key IN ('evolution_url', 'evolution_apikey')");
+        $stmt_config = $conn->query("SELECT config_key, config_value FROM agent_config WHERE config_key IN ('evolution_url', 'evolution_apikey', 'evolution_instance')");
         $configs = $stmt_config->fetchAll(PDO::FETCH_KEY_PAIR);
-        $evolution_url = $configs['evolution_url'] ?? 'http://72.61.56.104:63633/message/sendText/claus';
-        $evolution_apikey = $configs['evolution_apikey'] ?? '185BD7822A0E-4C76-AF03-82957D439B1D';
+        $evo_base         = rtrim($configs['evolution_url'] ?? 'http://72.61.56.104:42199', '/');
+        $evo_inst         = $configs['evolution_instance'] ?? 'claus';
+        $evolution_url    = "$evo_base/message/sendText/$evo_inst";
+        $evolution_apikey = $configs['evolution_apikey'] ?? 'MRfty5LcqF2IDGdHD7CmvXS2p6xhZ2FC';
 
         // Enviar a mensagem
         $sent = sendWhatsApp($evolution_url, $evolution_apikey, $number, $signed_message);
@@ -413,6 +425,401 @@ switch ($action) {
 
         // Sempre retornar sucesso para a UI para não bloquear o usuário
         echo json_encode(['status' => 'success', 'message' => 'Mensagem enviada para processamento.']);
+        break;
+
+    // ── save_config ──────────────────────────────────────────────
+    case 'save_config':
+        $input = json_decode(file_get_contents('php://input'), true) ?? [];
+        $saved = 0;
+        foreach ($input as $k => $v) {
+            $k = preg_replace('/[^a-z0-9_]/', '', strtolower(trim((string)$k)));
+            if (!$k) continue;
+            try {
+                $conn->prepare("INSERT INTO agent_config (config_key, config_value) VALUES (?,?) ON DUPLICATE KEY UPDATE config_value=VALUES(config_value)")
+                     ->execute([$k, (string)$v]);
+                $saved++;
+            } catch (Exception $e) {}
+        }
+        echo json_encode(['status' => 'success', 'saved' => $saved]);
+        break;
+
+    // ── test_evolution ───────────────────────────────────────────
+    case 'test_evolution':
+        $input   = json_decode(file_get_contents('php://input'), true) ?? [];
+        $evoUrl  = rtrim($input['url'] ?? '', '/');
+        $evoKey  = $input['apikey'] ?? '';
+        $evoInst = $input['instance'] ?? 'claus';
+
+        if (!$evoUrl || !$evoKey) {
+            echo json_encode(['status' => 'error', 'message' => 'url e apikey obrigatórios']); break;
+        }
+        $ch = curl_init("$evoUrl/instance/fetchInstances");
+        curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 10,
+            CURLOPT_HTTPHEADER => ['apikey: '.$evoKey, 'Content-Type: application/json']]);
+        $resp = curl_exec($ch); $code = curl_getinfo($ch, CURLINFO_HTTP_CODE); $err = curl_error($ch); curl_close($ch);
+
+        if ($err || $code < 200 || $code >= 300) {
+            echo json_encode(['status' => 'error', 'message' => "HTTP $code | $err"]); break;
+        }
+        $data = json_decode($resp, true) ?? [];
+        $found = null;
+        foreach ($data as $inst) {
+            $name = $inst['name'] ?? $inst['instance']['instanceName'] ?? '';
+            if (strtolower($name) === strtolower($evoInst)) { $found = $inst; break; }
+        }
+        if (!empty($input['full'])) {
+            echo json_encode(['status' => 'ok', 'instances' => $data, 'target' => $found]);
+        } else {
+            $state = $found['connectionStatus'] ?? $found['instance']['status'] ?? 'unknown';
+            echo json_encode(['status' => 'ok', 'connected' => true, 'state' => $state]);
+        }
+        break;
+
+    // ── get_webhook_status ───────────────────────────────────────
+    case 'get_webhook_status':
+        $input   = json_decode(file_get_contents('php://input'), true) ?? [];
+        $evoUrl  = rtrim($input['url']      ?? getConfigVal($conn,'evolution_url')      ?? '', '/');
+        $evoKey  = $input['apikey']         ?? getConfigVal($conn,'evolution_apikey')  ?? '';
+        $evoInst = $input['instance']       ?? getConfigVal($conn,'evolution_instance') ?? 'claus';
+
+        $ch = curl_init("$evoUrl/webhook/find/$evoInst");
+        curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 8,
+            CURLOPT_HTTPHEADER => ['apikey: '.$evoKey]]);
+        $resp = curl_exec($ch); curl_close($ch);
+        echo $resp ?: json_encode(['error' => 'no response']);
+        break;
+
+    // ── set_webhook ──────────────────────────────────────────────
+    case 'set_webhook':
+        $input      = json_decode(file_get_contents('php://input'), true) ?? [];
+        $evoUrl     = rtrim($input['url']         ?? getConfigVal($conn,'evolution_url')      ?? '', '/');
+        $evoKey     = $input['apikey']             ?? getConfigVal($conn,'evolution_apikey')  ?? '';
+        $evoInst    = $input['instance']           ?? getConfigVal($conn,'evolution_instance') ?? 'claus';
+        $webhookUrl = $input['webhook_url']        ?? 'https://'.$_SERVER['HTTP_HOST'].'/webhook.php';
+        $events     = $input['events']             ?? ['MESSAGES_UPSERT','MESSAGES_UPDATE','SEND_MESSAGE','CONNECTION_UPDATE'];
+
+        // Evolution v2.3: payload wrapped in "webhook" key
+        $payload = json_encode(['webhook' => [
+            'url'      => $webhookUrl,
+            'byEvents' => false,
+            'base64'   => false,
+            'enabled'  => true,
+            'events'   => $events,
+        ]]);
+
+        $ch = curl_init("$evoUrl/webhook/set/$evoInst");
+        curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $payload,
+            CURLOPT_HTTPHEADER => ['Content-Type: application/json','apikey: '.$evoKey],
+            CURLOPT_TIMEOUT => 15]);
+        $resp = curl_exec($ch); $code = curl_getinfo($ch, CURLINFO_HTTP_CODE); $err = curl_error($ch); curl_close($ch);
+
+        if ($err || $code < 200 || $code >= 300) {
+            // Fallback: flat payload (older versions)
+            $payload2 = json_encode(['url'=>$webhookUrl,'webhook_by_events'=>false,'webhook_base64'=>false,'enabled'=>true,'events'=>$events]);
+            $ch2 = curl_init("$evoUrl/webhook/set/$evoInst");
+            curl_setopt_array($ch2, [CURLOPT_RETURNTRANSFER=>true,CURLOPT_POST=>true,
+                CURLOPT_POSTFIELDS=>$payload2,CURLOPT_HTTPHEADER=>['Content-Type: application/json','apikey: '.$evoKey],CURLOPT_TIMEOUT=>15]);
+            $resp2 = curl_exec($ch2); $code2 = curl_getinfo($ch2, CURLINFO_HTTP_CODE); $err2 = curl_error($ch2); curl_close($ch2);
+            if (!$err2 && $code2 >= 200 && $code2 < 300) {
+                $r = json_decode($resp2, true) ?? []; $r['status'] = 'ok'; echo json_encode($r);
+            } else {
+                echo json_encode(['status'=>'error','message'=>"HTTP $code (v2) / $code2 (v1)",'raw'=>$resp]);
+            }
+        } else {
+            $r = json_decode($resp, true) ?? []; $r['status'] = 'ok'; echo json_encode($r);
+        }
+        break;
+
+    // ── send_test_message ────────────────────────────────────────
+    case 'send_test_message':
+        $input   = json_decode(file_get_contents('php://input'), true) ?? [];
+        $evoBase2 = rtrim($input['url']     ?? getConfigVal($conn,'evolution_url')      ?? '', '/');
+        $evoKey2  = $input['apikey']        ?? getConfigVal($conn,'evolution_apikey')  ?? '';
+        $evoInst2 = $input['instance']      ?? getConfigVal($conn,'evolution_instance') ?? 'claus';
+        $toNum    = $input['number']        ?? getConfigVal($conn,'evolution_number')  ?? '';
+
+        if (!$toNum) { echo json_encode(['status'=>'error','message'=>'Número não configurado']); break; }
+        $payload = json_encode(['number'=>$toNum,'text'=>'✅ Claus Admin: conexão OK! '.date('d/m/Y H:i:s'),'delay'=>500]);
+        $ch = curl_init("$evoBase2/message/sendText/$evoInst2");
+        curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER=>true,CURLOPT_POST=>true,
+            CURLOPT_POSTFIELDS=>$payload,CURLOPT_HTTPHEADER=>['Content-Type: application/json','apikey: '.$evoKey2],CURLOPT_TIMEOUT=>12]);
+        $resp = curl_exec($ch); $code = curl_getinfo($ch, CURLINFO_HTTP_CODE); $err = curl_error($ch); curl_close($ch);
+        $r = json_decode($resp, true) ?? ['raw'=>$resp];
+        $r['http'] = $code; $r['status'] = (!$err && $code>=200 && $code<300) ? 'ok' : 'error';
+        if ($err) $r['message'] = $err;
+        echo json_encode($r);
+        break;
+
+    // ── test_ai_key ──────────────────────────────────────────────
+    case 'test_ai_key':
+        $input    = json_decode(file_get_contents('php://input'), true) ?? [];
+        $provider = $input['provider'] ?? 'openai';
+        $apikey   = $input['apikey'] ?? '';
+        if (!$apikey) { echo json_encode(['status'=>'error','message'=>'apikey obrigatório']); break; }
+        $eps = [
+            'openai'      => ['https://api.openai.com/v1/models',                                      'Authorization: Bearer '.$apikey],
+            'groq'        => ['https://api.groq.com/openai/v1/models',                                 'Authorization: Bearer '.$apikey],
+            'gemini'      => ['https://generativelanguage.googleapis.com/v1beta/models?key='.$apikey,   ''],
+            'claude'      => ['https://api.anthropic.com/v1/models',                                   'x-api-key: '.$apikey],
+            'together'    => ['https://api.together.xyz/v1/models',                                    'Authorization: Bearer '.$apikey],
+            'huggingface' => ['https://huggingface.co/api/models',                                     'Authorization: Bearer '.$apikey],
+        ];
+        $ep = $eps[$provider] ?? null;
+        if (!$ep) { echo json_encode(['status'=>'error','message'=>'Provedor desconhecido']); break; }
+        $hdrs = ['Content-Type: application/json'];
+        if ($ep[1]) $hdrs[] = $ep[1];
+        $ch = curl_init($ep[0]);
+        curl_setopt_array($ch,[CURLOPT_RETURNTRANSFER=>true,CURLOPT_TIMEOUT=>10,CURLOPT_HTTPHEADER=>$hdrs]);
+        $resp = curl_exec($ch); $code = curl_getinfo($ch,CURLINFO_HTTP_CODE); curl_close($ch);
+        $d = json_decode($resp, true);
+        if ($code === 200) {
+            $models = array_slice(array_column($d['data'] ?? $d['models'] ?? [], 'id'), 0, 3);
+            echo json_encode(['status'=>'ok','model'=>implode(', ',$models)?:'OK','http'=>$code]);
+        } else {
+            echo json_encode(['status'=>'error','message'=>"HTTP $code",'http'=>$code]);
+        }
+        break;
+
+    // ── get_db_info ──────────────────────────────────────────────
+    // Reads db.php and returns parsed (masked) credentials for the settings UI
+    case 'get_db_info':
+        $dbFile = __DIR__ . '/db.php';
+        $info = ['host'=>'','name'=>'','user'=>'','pass_masked'=>'','port'=>'3306','file_found'=>false];
+        if (file_exists($dbFile)) {
+            $src = file_get_contents($dbFile);
+            $info['file_found'] = true;
+            preg_match('/host=([^;"\'\s]+)/i',   $src, $mh); $info['host'] = $mh[1] ?? '';
+            preg_match('/dbname=([^;"\'\s]+)/i',  $src, $md); $info['name'] = $md[1] ?? '';
+            preg_match('/port=([^;"\'\s]+)/i',    $src, $mp); $info['port'] = $mp[1] ?? '3306';
+            // Try multiple user patterns
+            if (preg_match('/["\']user["\'\s]*=>\s*["\']([^"\']+)/i',   $src, $mu)) $info['user'] = $mu[1];
+            elseif (preg_match('/PDO\([^,]+,\s*["\']([^"\']+)["\'],\s*["\']([^"\']*)/i', $src, $mu)) {
+                $info['user'] = $mu[1]; // pass hint
+            }
+            // Mask password — just show it's set
+            if (preg_match('/["\']password["\'\s]*=>\s*["\']([^"\']+)/i', $src, $mpw) ||
+                preg_match('/PDO\([^,]+,[^,]+,\s*["\']([^"\']+)/i',        $src, $mpw)) {
+                $info['pass_masked'] = strlen($mpw[1]) ? str_repeat('*', min(strlen($mpw[1]),8)) : '';
+                $info['pass_set'] = !empty($mpw[1]);
+            }
+        }
+        echo json_encode($info);
+        break;
+
+    // ── save_db_config ───────────────────────────────────────────
+    // Rewrites db.php with new credentials
+    case 'save_db_config':
+        $input = json_decode(file_get_contents('php://input'), true) ?? [];
+        $host  = $input['db_host'] ?? 'localhost';
+        $name  = $input['db_name'] ?? '';
+        $user  = $input['db_user'] ?? '';
+        $pass  = $input['db_pass'] ?? '';
+        $port  = $input['db_port'] ?? '3306';
+        if (!$name || !$user) { echo json_encode(['status'=>'error','message'=>'dbname e user obrigatórios']); break; }
+        // If pass is __KEEP__, read existing password from current db.php
+        if ($pass === '__KEEP__') {
+            $existing = __DIR__ . '/db.php';
+            if (file_exists($existing)) {
+                $src = file_get_contents($existing);
+                if (preg_match("/'([^']+)'\s*,\s*\[/s", $src, $m)) $pass = $m[1] ?? '';
+                // More robust: find 3rd string arg to new PDO(...)
+                if (preg_match('/new PDO\(\s*["\'][^"\']+["\'],\s*["\'][^"\']+["\'],\s*["\']([^"\']*)["\']/', $src, $mpw)) {
+                    $pass = $mpw[1];
+                }
+            }
+        }
+        $dbPhp = "<?php\n// db.php — gerado por configuracoes.php em ".date('Y-m-d H:i:s')."\ntry {\n    \$conn = new PDO(\n        'mysql:host=$host;port=$port;dbname=$name;charset=utf8mb4',\n        '$user',\n        '$pass',\n        [\n            PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,\n            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,\n        ]\n    );\n} catch (PDOException \$e) {\n    http_response_code(500);\n    die(json_encode(['status' => 'error', 'message' => 'DB connection failed: ' . \$e->getMessage()]));\n}\n";
+        $dbFile = __DIR__ . '/db.php';
+        $backup = __DIR__ . '/db_backup_' . date('Ymd_His') . '.php';
+        if (file_exists($dbFile)) copy($dbFile, $backup);
+        if (file_put_contents($dbFile, $dbPhp) !== false) {
+            echo json_encode(['status'=>'success','message'=>'db.php atualizado','backup'=>basename($backup)]);
+        } else {
+            echo json_encode(['status'=>'error','message'=>'Sem permissão para escrever db.php']);
+        }
+        break;
+
+    // ── get_memory ───────────────────────────────────────────────
+    // Returns all agent memory sections (soul, identity, user, longterm, daily logs)
+    case 'get_memory':
+        $keys = ['mem_soul','mem_identity','mem_user','mem_longterm'];
+        $mem  = [];
+        foreach ($keys as $k) {
+            $v = getConfigVal($conn, $k);
+            $mem[$k] = $v ?? '';
+        }
+        // Daily logs: last 7 days
+        $mem['daily_logs'] = [];
+        try {
+            $stmt = $conn->prepare(
+                "SELECT config_key, config_value FROM agent_config
+                 WHERE config_key LIKE 'mem_daily_%'
+                 ORDER BY config_key DESC LIMIT 14"
+            );
+            $stmt->execute();
+            $rows = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+            foreach ($rows as $k => $v) {
+                $date = str_replace('mem_daily_', '', $k);
+                $mem['daily_logs'][] = ['date' => $date, 'content' => $v];
+            }
+        } catch (Exception $e) {}
+        echo json_encode($mem);
+        break;
+
+    // ── save_memory ──────────────────────────────────────────────
+    // Structured sections: replace. Daily logs: APPEND ONLY (never overwrite)
+    case 'save_memory':
+        $input   = json_decode(file_get_contents('php://input'), true) ?? [];
+        $section = $input['section'] ?? '';    // soul|identity|user|longterm|daily
+        $content = $input['content'] ?? '';
+        $date    = $input['date']    ?? date('Y-m-d');
+        $allowed = ['mem_soul','mem_identity','mem_user','mem_longterm'];
+
+        if ($section === 'daily') {
+            // APPEND ONLY — never replace daily log
+            $key     = "mem_daily_$date";
+            $current = getConfigVal($conn, $key) ?? '';
+            $ts      = date('H:i');
+            $newLine = "\n[$ts] " . trim($content);
+            $updated = $current . $newLine;
+            $conn->prepare("INSERT INTO agent_config(config_key,config_value) VALUES(?,?) ON DUPLICATE KEY UPDATE config_value=VALUES(config_value)")
+                 ->execute([$key, $updated]);
+            echo json_encode(['status'=>'success','action'=>'appended','key'=>$key]);
+        } elseif (in_array($section, $allowed)) {
+            // Structured sections: save new version but keep change history in daily log
+            $old = getConfigVal($conn, $section) ?? '';
+            $conn->prepare("INSERT INTO agent_config(config_key,config_value) VALUES(?,?) ON DUPLICATE KEY UPDATE config_value=VALUES(config_value)")
+                 ->execute([$section, $content]);
+            // Log the change in today's daily memory
+            if (trim($old) !== trim($content)) {
+                $logKey = 'mem_daily_' . date('Y-m-d');
+                $logCurrent = getConfigVal($conn, $logKey) ?? '';
+                $logLine = "\n[" . date('H:i') . "] [SISTEMA] Seção '$section' atualizada.";
+                $conn->prepare("INSERT INTO agent_config(config_key,config_value) VALUES(?,?) ON DUPLICATE KEY UPDATE config_value=VALUES(config_value)")
+                     ->execute([$logKey, $logCurrent . $logLine]);
+            }
+            echo json_encode(['status'=>'success','action'=>'saved','section'=>$section]);
+        } else {
+            echo json_encode(['status'=>'error','message'=>'Seção inválida']);
+        }
+        break;
+
+    // ── get_agenda ───────────────────────────────────────────────
+    case 'get_agenda':
+        try {
+            // Try extended contacts table first
+            $stmt = $conn->query(
+                "SELECT id, name, phone_number, relationship,
+                        notes, created_at,
+                        COALESCE(last_seen, '') as last_seen,
+                        COALESCE(source, 'manual') as source
+                 FROM contacts ORDER BY name ASC"
+            );
+            echo json_encode($stmt->fetchAll(PDO::FETCH_ASSOC));
+        } catch (Exception $e) {
+            // Fallback to basic contacts table
+            try {
+                $stmt = $conn->query("SELECT id, name, phone_number, relationship, notes FROM contacts ORDER BY name");
+                echo json_encode($stmt->fetchAll(PDO::FETCH_ASSOC));
+            } catch (Exception $e2) {
+                echo json_encode([]);
+            }
+        }
+        break;
+
+    // ── save_contact ─────────────────────────────────────────────
+    // Always additive: UPDATE if phone exists, INSERT if new. Never silent delete.
+    case 'save_contact':
+        $input = json_decode(file_get_contents('php://input'), true) ?? [];
+        $phone = trim($input['phone_number'] ?? $input['phone'] ?? '');
+        $name  = trim($input['name'] ?? '');
+        $rel   = trim($input['relationship'] ?? '');
+        $notes = trim($input['notes'] ?? '');
+        $source= $input['source'] ?? 'manual';
+        if (!$phone) { echo json_encode(['status'=>'error','message'=>'phone_number obrigatório']); break; }
+
+        // Ensure columns exist (add if missing — safe migration)
+        try {
+            $conn->exec("ALTER TABLE contacts ADD COLUMN IF NOT EXISTS last_seen DATETIME NULL");
+            $conn->exec("ALTER TABLE contacts ADD COLUMN IF NOT EXISTS source VARCHAR(50) DEFAULT 'manual'");
+        } catch (Exception $e) {}
+
+        try {
+            // Check if exists
+            $existing = $conn->prepare("SELECT id, notes FROM contacts WHERE phone_number=? LIMIT 1");
+            $existing->execute([$phone]);
+            $row = $existing->fetch(PDO::FETCH_ASSOC);
+
+            if ($row) {
+                // ADDITIVE: merge notes, don't discard old ones
+                $mergedNotes = $row['notes'];
+                if ($notes && trim($notes) !== trim($row['notes'])) {
+                    $mergedNotes = $row['notes'] ? $row['notes']."\n".$notes : $notes;
+                }
+                $stmt = $conn->prepare(
+                    "UPDATE contacts SET name=?, relationship=?, notes=?, last_seen=NOW(), source=? WHERE id=?"
+                );
+                $stmt->execute([$name ?: $row['name'] ?? $phone, $rel, $mergedNotes, $source, $row['id']]);
+                echo json_encode(['status'=>'success','action'=>'updated','id'=>$row['id']]);
+            } else {
+                $stmt = $conn->prepare(
+                    "INSERT INTO contacts (name, phone_number, relationship, notes, last_seen, source)
+                     VALUES (?,?,?,?,NOW(),?)"
+                );
+                $stmt->execute([$name ?: $phone, $phone, $rel, $notes, $source]);
+                echo json_encode(['status'=>'success','action'=>'inserted','id'=>$conn->lastInsertId()]);
+            }
+        } catch (PDOException $e) {
+            echo json_encode(['status'=>'error','message'=>$e->getMessage()]);
+        }
+        break;
+
+    // ── delete_contact ───────────────────────────────────────────
+    // Only deletes when explicitly requested
+    case 'delete_contact':
+        $input = json_decode(file_get_contents('php://input'), true) ?? [];
+        $id    = intval($input['id'] ?? 0);
+        if (!$id) { echo json_encode(['status'=>'error','message'=>'id obrigatório']); break; }
+        try {
+            $conn->prepare("DELETE FROM contacts WHERE id=?")->execute([$id]);
+            echo json_encode(['status'=>'success','deleted'=>$id]);
+        } catch (Exception $e) {
+            echo json_encode(['status'=>'error','message'=>$e->getMessage()]);
+        }
+        break;
+
+    // ── extract_contacts ─────────────────────────────────────────
+    // Scans recent agent_logs for phone numbers not yet in contacts
+    case 'extract_contacts':
+        try {
+            $adminPhone = getConfigVal($conn, 'evolution_number') ?? '';
+            // Get all unique sender_numbers from logs that aren't admin
+            $stmt = $conn->prepare(
+                "SELECT DISTINCT sender_number,
+                        MAX(timestamp) as last_seen,
+                        COUNT(*) as msg_count,
+                        MAX(CASE WHEN sender_role='user' THEN message END) as last_msg
+                 FROM agent_logs
+                 WHERE sender_number != ?
+                   AND sender_number NOT LIKE '%admin%'
+                   AND sender_number IS NOT NULL
+                   AND sender_number != ''
+                   AND LENGTH(sender_number) >= 8
+                 GROUP BY sender_number"
+            );
+            $stmt->execute([$adminPhone]);
+            $numbers = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            // Check which ones aren't in contacts
+            $existingStmt = $conn->query("SELECT phone_number FROM contacts");
+            $existing = $existingStmt->fetchAll(PDO::FETCH_COLUMN);
+
+            $new = array_filter($numbers, fn($n) => !in_array($n['sender_number'], $existing));
+            echo json_encode(['status'=>'ok','new_contacts'=>array_values($new),'total_found'=>count($numbers),'already_saved'=>count($existing)]);
+        } catch (Exception $e) {
+            echo json_encode(['status'=>'error','message'=>$e->getMessage()]);
+        }
         break;
 
     default:

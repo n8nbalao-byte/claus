@@ -5,8 +5,8 @@
 
 // --- CONFIGURAÇÕES ---
 // Evolution API
-$evolution_url = 'http://72.61.56.104:63633/message/sendText/claus'; // Instância Claus
-$evolution_apikey = 'SUA_CHAVE_EVOLUTION_AQUI'; // Chave fornecida
+$evolution_url = 'http://72.61.56.104:42199/message/sendText/claus'; // Instância Claus
+$evolution_apikey = '0FED3972ADDE-43AD-A8A6-D75CB3D4F244'; // Chave fornecida
 
 // OpenAI (Valores padrão de fallback, caso o DB falhe ou esteja vazio)
 $default_openai_apikey = 'SUA_CHAVE_OPENAI_AQUI';
